@@ -33,6 +33,16 @@ DebugConfig/
 slprj/
 *.slxc
 
+# ===== 环境变量 / 密钥（绝对不能提交） =====
+.env
+.env.*
+!.env.example
+
+# ===== Node.js =====
+node_modules/
+npm-debug.log*
+yarn-error.log*
+
 # ===== 编辑器 / IDE =====
 .vscode/
 .idea/
