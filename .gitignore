@@ -1,0 +1,49 @@
+# ===== 编译 / 构建产物 =====
+build/
+Build/
+build-*/
+Debug/
+Release/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+*.o
+*.obj
+*.d
+*.a
+*.lib
+*.so
+*.dll
+*.exe
+*.out
+*.elf
+*.hex
+*.map
+*.bin
+
+# ===== 嵌入式工程（Keil / IAR / STM32CubeIDE） =====
+Objects/
+Listings/
+DebugConfig/
+
+# ===== MATLAB =====
+*.asv
+*.m~
+slprj/
+*.slxc
+
+# ===== 编辑器 / IDE =====
+.vscode/
+.idea/
+*.swp
+*~
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 临时文件 =====
+*.log
+*.tmp
