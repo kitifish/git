@@ -27,6 +27,18 @@ Objects/
 Listings/
 DebugConfig/
 
+# ===== CMSIS 中本工程未使用的部分（体积优化） =====
+# 本工程只用到 CMSIS/Device 和 CMSIS/Include，
+# DSP / Lib / NN / RTOS / Core_A 共约 50MB，不纳入版本管理。
+# 需要时可在 CubeMX 里重新生成，或从 ST 官方 CMSIS 包补齐。
+Drivers/CMSIS/DSP/
+Drivers/CMSIS/Lib/
+Drivers/CMSIS/NN/
+Drivers/CMSIS/RTOS/
+Drivers/CMSIS/RTOS2/
+Drivers/CMSIS/Core_A/
+Drivers/CMSIS/docs/
+
 # ===== MATLAB =====
 *.asv
 *.m~
