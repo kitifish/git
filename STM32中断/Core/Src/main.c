@@ -31,7 +31,7 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define KEY_DEBOUNCE_MS   200U   /* 按键消抖窗口：距上次有效触发不足该时长的边沿一律丢弃 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -198,11 +198,30 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+/**
+  * @brief  外部中断回调（EXTI0 / PA0 上升沿）
+  * @note   这里只做一件事：把一次"物理按压"过滤成一次"有效事件"。
+  *
+  *         机械触点和杜邦线接触在闭合瞬间会产生 5~20 ms 的电平抖动，
+  *         表现为连续的多个上升沿。若不加处理，按一次灯会跳好几档。
+  *
+  *         做法：记录上一次"被采纳"的时间戳，落在窗口内的边沿直接丢弃。
+  *         200 ms 除了覆盖抖动，还顺带防止手速连按被算成两次。
+  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  static uint32_t last_key_tick = 0;   /* 上次有效触发的时刻 */
+
   if (GPIO_Pin == KEY_Pin)
   {
-    mode = (mode + 1) % 4;
+    uint32_t now = HAL_GetTick();
+
+    /* 无符号减法会自动处理计数器回绕，不需要额外判断 */
+    if ((now - last_key_tick) >= KEY_DEBOUNCE_MS)
+    {
+      last_key_tick = now;
+      mode = (mode + 1) % 4;
+    }
   }
 }
 /* USER CODE END 4 */
