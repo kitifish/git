@@ -2,6 +2,7 @@
 build/
 Build/
 build-*/
+cmake-build-*/
 Debug/
 Release/
 CMakeFiles/
@@ -70,3 +71,6 @@ desktop.ini
 # ===== 临时文件 =====
 *.log
 *.tmp
+
+# ===== 仓库根上移时的遗留容器（CLion 占用未删除，关掉 CLion 后可手动删除）=====
+interrupt/
