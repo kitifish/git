@@ -44,6 +44,19 @@ UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
 static const uint8_t HELLO_MSG[] = "Hello World!\r\n";
+static const uint8_t MENU_MSG[] =
+  "\r\n=== LED Blink Control ===\r\n"
+  "1:P1000  2:P500  3:P250  4:P100  5:P50\r\n"
+  "0:stop   +:slower   -:faster\r\n"
+  "========================\r\n";
+
+volatile uint32_t led_interval_ms = 500U;
+volatile uint8_t  led_running     = 1U;
+uint32_t          last_toggle_tick = 0U;
+
+uint8_t          rx_byte   = 0U;
+volatile uint8_t rx_cmd    = 0U;
+volatile uint8_t rx_ready  = 0U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -56,7 +69,50 @@ static void MX_USART1_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void uart_send(const char *s)
+{
+  uint16_t len = 0U;
 
+  while (s[len] != '\0')
+  {
+    len++;
+  }
+  HAL_UART_Transmit(&huart1, (uint8_t *)s, len, 100U);
+}
+
+static void uart_report(uint32_t ms)
+{
+  char     buf[24];
+  char     num[10];
+  uint32_t i = 0U;
+  uint32_t n = 0U;
+
+  buf[i++] = 'O';
+  buf[i++] = 'K';
+  buf[i++] = ' ';
+
+  if (ms == 0U)
+  {
+    num[n++] = '0';
+  }
+  while (ms > 0U)
+  {
+    num[n++] = (char)('0' + (ms % 10U));
+    ms /= 10U;
+  }
+  while (n > 0U)
+  {
+    buf[i++] = num[--n];
+  }
+
+  buf[i++] = ' ';
+  buf[i++] = 'm';
+  buf[i++] = 's';
+  buf[i++] = '\r';
+  buf[i++] = '\n';
+
+  HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)i, 100U);
+}
 /* USER CODE END 0 */
 
 /**
@@ -90,7 +146,14 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  uart_send((const char *)HELLO_MSG);
+  uart_send((const char *)MENU_MSG);
 
+  led_running        = 1U;
+  led_interval_ms    = 500U;
+  last_toggle_tick   = HAL_GetTick();
+
+  HAL_UART_Receive_IT(&huart1, &rx_byte, 1U);
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -100,12 +163,83 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_UART_Transmit(&huart1,
-                      (uint8_t *)HELLO_MSG,
-                      sizeof(HELLO_MSG) - 1U,
-                      1000U);
+    if (rx_ready != 0U)
+    {
+      uint8_t cmd = rx_cmd;
+      rx_ready = 0U;
 
-    HAL_Delay(1000);
+      switch (cmd)
+      {
+        case '0':
+          led_running = 0U;
+          HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+          uart_send("STOP\r\n");
+          break;
+
+        case '1':
+          led_interval_ms = 1000U;
+          led_running     = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '2':
+          led_interval_ms = 500U;
+          led_running     = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '3':
+          led_interval_ms = 250U;
+          led_running     = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '4':
+          led_interval_ms = 100U;
+          led_running     = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '5':
+          led_interval_ms = 50U;
+          led_running     = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '+':
+          if (led_interval_ms < 2000U)
+          {
+            led_interval_ms += 100U;
+          }
+          led_running = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '-':
+          if (led_interval_ms > 100U)
+          {
+            led_interval_ms -= 100U;
+          }
+          led_running = 1U;
+          uart_report(led_interval_ms);
+          break;
+
+        case '\r':
+        case '\n':
+          break;
+
+        default:
+          uart_send("? use 0-5 or + -\r\n");
+          break;
+      }
+    }
+
+    if ((led_running != 0U) &&
+        ((HAL_GetTick() - last_toggle_tick) >= led_interval_ms))
+    {
+      last_toggle_tick = HAL_GetTick();
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    }
   }
   /* USER CODE END 3 */
 }
@@ -189,13 +323,25 @@ static void MX_USART1_UART_Init(void)
   */
 static void MX_GPIO_Init(void)
 {
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
   /* USER CODE BEGIN MX_GPIO_Init_1 */
 
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_GPIO_Port, LED_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : LED_Pin */
+  GPIO_InitStruct.Pin = LED_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
@@ -203,7 +349,17 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART1)
+  {
+    rx_cmd   = rx_byte;
+    rx_ready = 1U;
 
+    /* 重新挂上接收，否则只能收到一个字节 */
+    HAL_UART_Receive_IT(&huart1, &rx_byte, 1U);
+  }
+}
 /* USER CODE END 4 */
 
 /**
