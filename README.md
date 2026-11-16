@@ -7,12 +7,13 @@
 ```
 STM32/
 ├── STM32中断/       外部中断练习：PC13 LED + PA0 按键，四档闪烁状态机
-├── helloworldsent/  串口双向通信：USART1 发送 Hello World + 接收命令控制闪灯
+├── helloworldsent/  串口双向通信：USART1 轮询发送 Hello World + 接收命令控制闪灯
+├── interruptsent/   中断版串口控制：USART1 接收中断 + 四档闪烁 + 定时翻转
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-四个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+五个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -62,6 +63,24 @@ PC13 驱动，**低电平点亮**（输出 `GPIO_PIN_RESET` 亮，`GPIO_PIN_SET`
 - 串口接收走 USART1 中断，回调里只存一个字节并置标志，然后重新挂上 `HAL_UART_Receive_IT`
 - 闪烁用 `HAL_GetTick()` 计时，主循环非阻塞翻转，**没有用 `HAL_Delay`**，否则收不到串口数据
 - 命令解析与回显都放在主循环，不在中断里做阻塞发送
+
+## interruptsent：全中断版串口控制
+
+和 `helloworldsent` 同样的命令集，但接收侧改成了中断驱动，是"轮询 → 中断"的对照版本：
+
+| 命令 | 效果 |
+|---|---|
+| `0` | 停止闪烁，LED 熄灭 |
+| `1` | 每 500 ms 翻转一次 |
+| `2` | 每 100 ms 翻转一次 |
+| `3` | 常亮 |
+
+每条命令回显当前模式。实现要点：
+
+- `HAL_UART_Receive_IT(&huart1, &rx_byte, 1)` 只挂 1 字节，进 `HAL_UART_RxCpltCallback` 后**必须重新挂接收**，否则只能收到第一个字符
+- 回调里只做三件事：存字节、置 `volatile` 标志、重挂接收，不做任何打印
+- 主循环用 `HAL_GetTick()` 判间隔翻转，`uint32_t` 无符号相减天然处理 49 天溢出
+- 没有用 `HAL_Delay`，否则串口响应会被拖死
 
 ## 编译
 
