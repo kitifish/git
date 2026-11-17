@@ -9,11 +9,12 @@ STM32/
 ├── STM32中断/       外部中断练习：PC13 LED + PA0 按键，四档闪烁状态机
 ├── helloworldsent/  串口双向通信：USART1 轮询发送 Hello World + 接收命令控制闪灯
 ├── interruptsent/   中断版串口控制：USART1 接收中断 + 四档闪烁 + 定时翻转
+├── receive/         不定长数据收发：DMA + 空闲中断（IDLE），回显长度与原文
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-五个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+六个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -81,6 +82,32 @@ PC13 驱动，**低电平点亮**（输出 `GPIO_PIN_RESET` 亮，`GPIO_PIN_SET`
 - 回调里只做三件事：存字节、置 `volatile` 标志、重挂接收，不做任何打印
 - 主循环用 `HAL_GetTick()` 判间隔翻转，`uint32_t` 无符号相减天然处理 49 天溢出
 - 没有用 `HAL_Delay`，否则串口响应会被拖死
+
+## receive：不定长数据收发（DMA + 空闲中断）
+
+串口收到的数据长度事先不知道，用定长的 `HAL_UART_Receive_IT` 没法处理。这里用**DMA 搬运 + 串口空闲中断（IDLE）**判帧尾：字节连续进内存，总线静默超过 3.5 个字符时间就认为一帧结束。
+
+上电打印提示，之后发什么都能收，回显格式为 `[收到 N 字节] 原文`。
+
+CubeMX 关键配置：
+
+| 项目 | 设置 |
+|---|---|
+| USART1 | 115200 / 8N1 / 收发双向 / `USART1 global interrupt` 使能 |
+| DMA Request | `USART1_RX` → DMA1 Channel 5（外设→内存、字节、地址自增） |
+| DMA Request | `USART1_TX` → DMA1 Channel 4（内存→外设） |
+| NVIC | `DMA1_Channel5_IRQn` 使能 |
+| SYS → Debug | **Serial Wire**（选 No Debug 会锁死 SWD） |
+
+实现要点：
+
+- 启动接收只用 `HAL_UARTEx_ReceiveToIdle_DMA(&huart1, rx_buf, RX_BUF_SIZE)`
+- 这个 API 每次都顺手打开 DMA 半传输中断，缓冲区填一半（32 字节）会误触发回调，必须紧跟一句 `__HAL_DMA_DISABLE_IT(&hdma_usart1_rx, DMA_IT_HT)` 关掉
+- 回调 `HAL_UARTEx_RxEventCallback(huart, Size)` 里的 `Size` 就是本帧真实字节数，由 HAL 用「缓冲大小 − DMA 剩余计数」算出
+- 回调里只做四件事：`memcpy` 搬走、置 `volatile` 标志、重挂接收、返回。**绝不在中断里打印**，回显放在主循环
+- `HAL_UART_ErrorCallback` 里清溢出标志并重挂接收，否则一次溢出会让串口永久哑掉
+
+已知限制：缓冲区 64 字节，超长会在填满时先交一次回调、剩余部分算下一帧；主循环未处理完而新帧到达会覆盖 `frame_buf`，工程上需要双缓冲或环形队列。
 
 ## 编译
 
