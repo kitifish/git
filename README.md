@@ -11,11 +11,12 @@ STM32/
 ├── interruptsent/   中断版串口控制：USART1 接收中断 + 四档闪烁 + 定时翻转
 ├── receive/         不定长数据收发：DMA + 空闲中断（IDLE），回显长度与原文
 ├── TIM/             定时器计时：TIM4 计数换算成毫秒，串口定时上报
+├── xunjiTIM/        定时器外部时钟：循迹模块 DO→PA15，TIM2 ETR 计数，OLED 显示速度
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-七个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+八个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -134,6 +135,56 @@ CubeMX 配置：TIM4 `Clock Source = Internal Clock`，`Prescaler = 7199`，`Per
 - `#include <stdio.h>` 必须写在 `USER CODE BEGIN Includes` 内，否则重新生成代码时被清掉
 
 三个曾经踩过的坑都在这份代码里修正了：无换行、单位不是时间、异步发送复用缓冲区。
+
+## xunjiTIM：定时器外部时钟 + 传送带测速
+
+传送带上铺一圈黑白相间的条纹，循迹模块（TCRT5000 一类）架在条纹上方。黑白交替时模块的 `DO` 引脚输出方波，把方波接到 **PA15**，配置成 **TIM2 的外部时钟（ETR 模式 2）** —— 此时 TIM2 不再数内部 72 MHz，而是**每来一个上升沿 `CNT` 加 1**，计数完全由硬件完成，CPU 不用管。
+
+主循环每 500 ms 取一次 `CNT` 增量，就能算出这段时间走过几个条纹，进而得到速度和累计距离。
+
+CubeMX 关键配置：
+
+| 项目 | 设置 |
+|---|---|
+| TIM2 → Clock Source | **ETR2**（不是 Internal Clock） |
+| TIM2 → Prescaler / Counter Period | `0` / `65535` |
+| ETR2 → Clock Prescaler / Polarity | `/1` / Non Inverted |
+| ETR2 → **Clock Filter** | `15`（消抖，见下） |
+| PA15 | `TIM2_ETR`，GPIO **Pull-up** |
+| I2C1 | PB6=SCL、PB7=SDA、100 kHz（OLED） |
+| SYS → Debug | Serial Wire（PA15 同时是 JTDI，关掉 JTAG 才能当 ETR 用） |
+
+板子上 TIM2_CH1_ETR 默认在 PA0，本工程 PA0 被 ADC 占用，CubeMX 自动做了 **TIM2 部分重映射 1**（`__HAL_AFIO_REMAP_TIM2_PARTIAL_1()`），把 ETR 挪到 PA15。
+
+OLED 界面（ASCII 大字 + 小字）：
+
+```
+SPEED   mm/s  SIM
+  832.0
+PULSE 1042
+LEN 20840 mm
+```
+
+换算关系：
+
+```c
+delta       = (uint16_t)(now_cnt - last_cnt);          /* 本窗口脉冲数 */
+speed_01mms = delta * STRIPE_MM * 10000 / WIN_MS;      /* 单位 0.1 mm/s */
+distance_mm = total_pulse * STRIPE_MM;
+```
+
+`STRIPE_MM` 是一条"黑+白"对应的传送距离（毫米），用尺子量出来填进去；这个数错了速度会整体成比例偏大/偏小，但趋势一定正确。
+
+实现要点：
+
+- **不需要开 TIM2 更新中断**。教程用中断数溢出次数，但 `(uint16_t)(now - last)` 无符号相减本身就能跨过 65535 回绕，只要一个窗口内脉冲数小于 65536（约 13 万脉冲/秒，循迹模块远远到不了）就永远正确
+- **Clock Filter 的作用**：滤波器按固定采样率连续检验 N 次，窄于真实脉宽的毛刺被丢弃。72 MHz 下 `Filter = 15` 约对应 3.5 µs 最小脉宽，传送带速度完全够用
+- **避免浮点**：速度用整数存 0.1 mm/s，显示时拆成 `speed/10` 和 `speed%10` 两段拼接
+- **有模拟模式**：`SIM_PULSE 1` 时用内部三角波造脉冲（20~80 脉冲/秒），没有传感器也能验证显示、换算和刷新节奏；拿到模块后改成 `0` 即可，其它代码不用动
+- **中文字库只有 4 个字**：`font16x16` 里仅"波特律动"四个汉字，所以界面标签全用 ASCII。要显示中文得用[取模助手](https://led.baud-dance.com)生成字模补进 `font.c` 的 `zh16x16[]`（4 字节 UTF-8 + 32 字节点阵）
+- `oled.c` / `font.c` 是手写文件，CubeMX 不知道它们的存在，必须在**顶层** `CMakeLists.txt` 的 `target_sources` 里登记，否则链接报 `undefined reference to OLED_Init`
+
+已知限制：一个窗口内脉冲超过 65536 时增量会被截断（需要改累计方式）；`STRIPE_MM` 与实际不符会带来固定比例误差。
 
 ## 编译
 
