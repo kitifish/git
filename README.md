@@ -10,11 +10,12 @@ STM32/
 ├── helloworldsent/  串口双向通信：USART1 轮询发送 Hello World + 接收命令控制闪灯
 ├── interruptsent/   中断版串口控制：USART1 接收中断 + 四档闪烁 + 定时翻转
 ├── receive/         不定长数据收发：DMA + 空闲中断（IDLE），回显长度与原文
+├── TIM/             定时器计时：TIM4 计数换算成毫秒，串口定时上报
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-六个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+七个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -108,6 +109,31 @@ CubeMX 关键配置：
 - `HAL_UART_ErrorCallback` 里清溢出标志并重挂接收，否则一次溢出会让串口永久哑掉
 
 已知限制：缓冲区 64 字节，超长会在填满时先交一次回调、剩余部分算下一帧；主循环未处理完而新帧到达会覆盖 `frame_buf`，工程上需要双缓冲或环形队列。
+
+## TIM：定时器计时 + 串口上报
+
+TIM4 自由计数，主循环把 CNT 的增量累加成真实毫秒，每 100 ms 通过 USART1 打印一行。串口助手 115200，输出形如：
+
+```
+TIM4 timer started
+CNT=  999  elapsed=  100 ms
+CNT= 1999  elapsed=  200 ms
+CNT=   58  elapsed= 6554 ms
+```
+
+`CNT` 会从 65535 翻回 0，而 `elapsed` 继续增长 —— 这是判断"回绕处理正确"的直接证据。
+
+CubeMX 配置：TIM4 `Clock Source = Internal Clock`，`Prescaler = 7199`，`Period` 用默认 65535。TIM4 挂在 APB1（分频 /2 后定时器时钟仍为 72 MHz），所以 72 MHz ÷ 7200 = 10 kHz，**一个计数 = 0.1 ms**，CNT 从 0 数到 65535 约 6.55 秒一轮。
+
+实现要点：
+
+- **不能直接打印 CNT**：它只反映当前这一轮的位置，到顶就归零，不是时间
+- 每圈主循环取一次增量并累加：`delta = (uint16_t)(now - last)`。无符号相减天然跨过回绕，不需要 `if (now < last)` 分支
+- 用 `HAL_UART_Transmit` 而不是 `HAL_UART_Transmit_IT`：后者异步返回，同一个 `sprintf` 缓冲区被下一轮覆写会发出残缺数据，且 `HAL_BUSY` 时静默丢帧
+- 打印带 `\r\n`。缺了它串口助手里所有内容挤成一条不断刷新的长串，看起来像"没有输出"
+- `#include <stdio.h>` 必须写在 `USER CODE BEGIN Includes` 内，否则重新生成代码时被清掉
+
+三个曾经踩过的坑都在这份代码里修正了：无换行、单位不是时间、异步发送复用缓冲区。
 
 ## 编译
 
