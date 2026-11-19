@@ -12,11 +12,12 @@ STM32/
 ├── receive/         不定长数据收发：DMA + 空闲中断（IDLE），回显长度与原文
 ├── TIM/             定时器计时：TIM4 计数换算成毫秒，串口定时上报
 ├── xunjiTIM/        定时器外部时钟：循迹模块 DO→PA15，TIM2 ETR 计数，OLED 显示速度
+├── TIM_SlaveMode/   定时器从模式：TIM2 复位模式 + TI1FP1 触发，CNT 即外部信号周期
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-八个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+九个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -185,6 +186,32 @@ distance_mm = total_pulse * STRIPE_MM;
 - `oled.c` / `font.c` 是手写文件，CubeMX 不知道它们的存在，必须在**顶层** `CMakeLists.txt` 的 `target_sources` 里登记，否则链接报 `undefined reference to OLED_Init`
 
 已知限制：一个窗口内脉冲超过 65536 时增量会被截断（需要改累计方式）；`STRIPE_MM` 与实际不符会带来固定比例误差。
+
+## TIM_SlaveMode：定时器从模式（复位模式）
+
+和 `xunjiTIM` 的"外部时钟"是两条不同的路：这里 TIM2 **仍然用内部 72 MHz 时钟**数数，但把外部信号接到 **TI1FP1（PA15）**，配置成从模式 **Reset（复位模式）** —— 外部信号**每来一个上升沿就把 CNT 清零**。于是 CNT 里存的不是"总共来了多少脉冲"，而是"**两个上升沿之间过了多少个内部计数**"，也就是外部信号的周期（测周法）。
+
+CubeMX 配置：
+
+| 项目 | 设置 |
+|---|---|
+| TIM2 → Clock Source | Internal Clock |
+| TIM2 → Prescaler / Counter Period | `8000-1` / `5000-1`（72 MHz÷8000 = **9 kHz**，一个计数 ≈ 0.111 ms） |
+| TIM2 → Slave Mode | **Reset Mode** |
+| TIM2 → Trigger Source | **TI1FP1** |
+| Trigger Polarity / Filter | Rising / `15` |
+| PA15 | `TIM2_CH1`，GPIO Pull-up |
+| NVIC | `TIM2 global interrupt` 使能 |
+| USART1 | 115200 / 8N1，PA9=TX、PA10=RX |
+
+当前代码行为：更新中断里发一串中文，主循环每 500 ms 打印一次 `counter: N`。周期换算：`t = CNT / 9000` 秒，`f = 9000 / CNT` Hz。
+
+注意几点：
+
+- 更新频率实际是 72 MHz ÷ 8000 ÷ 5000 = **1.8 Hz**（约 556 ms 一次），不是 1 秒。要正好 1 秒，`Period` 填 `9000-1`
+- 中断回调里用 `HAL_UART_Transmit` 是**阻塞发送**，33 字节在 115200 下要 3 ms 左右，期间中断被占着；而且它和主循环的发送共用 `huart1`，两边同时发会互相打断。练手可以，正式代码应该在中断里置标志、主循环再发
+- `sprintf(message, "counter: %d")` 结尾**没有 `\r\n`**，串口助手里会挤成一条不断刷新的长串，看着像"输出不正常"
+- 发中文和 emoji 时串口助手显示乱码是正常的 —— 它们是 UTF-8 多字节，串口助手按 GBK 解码就对不上，不是代码有问题
 
 ## 编译
 
