@@ -13,11 +13,12 @@ STM32/
 ├── TIM/             定时器计时：TIM4 计数换算成毫秒，串口定时上报
 ├── xunjiTIM/        定时器外部时钟：循迹模块 DO→PA15，TIM2 ETR 计数，OLED 显示速度
 ├── TIM_SlaveMode/   定时器从模式：TIM2 复位模式 + TI1FP1 触发，CNT 即外部信号周期
+├── PWM_Light/       PWM 呼吸灯：TIM3_CH1（PA6）10kHz 输出，主循环扫 CCR
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-九个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+十个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -212,6 +213,46 @@ CubeMX 配置：
 - 中断回调里用 `HAL_UART_Transmit` 是**阻塞发送**，33 字节在 115200 下要 3 ms 左右，期间中断被占着；而且它和主循环的发送共用 `huart1`，两边同时发会互相打断。练手可以，正式代码应该在中断里置标志、主循环再发
 - `sprintf(message, "counter: %d")` 结尾**没有 `\r\n`**，串口助手里会挤成一条不断刷新的长串，看着像"输出不正常"
 - 发中文和 emoji 时串口助手显示乱码是正常的 —— 它们是 UTF-8 多字节，串口助手按 GBK 解码就对不上，不是代码有问题
+
+## PWM_Light：PWM 呼吸灯
+
+TIM3 的通道 1 输出 PWM 到 **PA6**，主循环把比较值从 0 扫到 99 再扫回来，每档停留 10 ms，灯就呈现出约 2 秒一呼一吸的效果。
+
+CubeMX 配置：
+
+| 项目 | 设置 |
+|---|---|
+| TIM3 → Channel1 | **PWM Generation CH1** |
+| PA6 | `TIM3_CH1` |
+| Prescaler / Counter Period | `72-1` / `100-1` |
+| Pulse（初始占空比） | `50` |
+| 时钟 | APB1 定时器时钟 72 MHz |
+
+换算：72 MHz ÷ 72 = **1 MHz** 计数频率，再数 100 个 → PWM 频率 **10 kHz**，占空比 = `CCR / 100`，一共 100 档。10 kHz 远高于人眼闪烁感知，所以看到的是亮度连续变化而不是闪。
+
+代码只有两处：
+
+```c
+/* USER CODE BEGIN 2 */
+HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);   /* 必须启动，否则引脚没波形 */
+
+/* 主循环里改占空比 */
+__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, i);   /* i = 0~99 */
+```
+
+要点：
+
+- `HAL_TIM_PWM_Start` 只调一次，**改亮度不需要停/启定时器**，直接写 CCR 立刻生效（`__HAL_TIM_SET_COMPARE` 就是写 `TIMx->CCR1`）
+- 分辨率和 PWM 频率是一对矛盾：`Period` 越大档位越细，但 72 MHz ÷ Prescaler ÷ Period 会变低。现在 100 档 / 10 kHz 是折中值
+- 真正的"呼吸"用线性扫 CCR 效果偏硬，人眼对亮度是对数感知的，想要更自然可以按平方/查表来扫
+
+⚠️ **PA6 不是板载 LED**。蓝色药丸的板载灯在 **PC13**，而且没有接到任何定时器通道上，改 PWM 占空比对它无效。要用这个工程，得外接一颗 LED：
+
+```
+PA6 ── 220Ω~1kΩ ──|>|── GND     （LED 长脚接电阻，短脚接 GND）
+```
+
+或者把板载灯那侧当作"只验证代码跑通"，想看效果还是外接一颗。ADC1 在 `.ioc` 里仍勾着（PA0），本工程没用到，可忽略。
 
 ## 编译
 
