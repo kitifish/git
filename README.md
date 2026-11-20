@@ -16,7 +16,7 @@ STM32/
 ├── PWM_Light/       PWM 呼吸灯：TIM3_CH1（PA6）10kHz 输出，主循环扫 CCR
 ├── TIM_Encoder/     旋转电位器：ADC 采样 → PC13 亮灭 + 三路 PWM 调光 + OLED 显示
 ├── TIM_Servo/       旋钮控舵机：ADC 采样电位器 → TIM4_CH3（PB8）50Hz PWM → OLED 显示角度
-├── TIM_Motor/       旋钮控直流电机：ADC → 带符号占空比 → TIM2_CH1/CH2（PA15/PB3）→ DRV8833
+├── TIM_Motor/       旋钮控直流电机：ADC → 带符号占空比 → TIM2_CH1/CH2（PA15/PB3）→ DRV8833，OLED 显示方向与占空比
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
@@ -386,6 +386,8 @@ CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 
 | DRV8833 | GND | GND |
 | DRV8833 | STBY / nSLP | **3V3**（悬空会一直待机，电机不动） |
 | DRV8833 | AOUT1 / AOUT2 | 电机两根线 |
+| OLED | VCC / GND | 3V3 / GND |
+| OLED | SCL / SDA | **PB6** / **PB7**（I2C1，100 kHz） |
 
 **参数**
 
@@ -410,12 +412,31 @@ CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 
 
 | 锚点 | 行号 | 内容 |
 |---|---|---|
-| `USER CODE BEGIN PD` | 36–71 | 中点、死区、最低占空比、加速度步长 |
-| `USER CODE BEGIN PV` | 80–83 | 当前输出 `out_duty`、时间戳 |
-| `USER CODE BEGIN 0` | 92–218 | `adc_read_avg` / `knob_to_pct` / `duty_from_pct` / `motor_apply` / `motor_task` |
-| `USER CODE BEGIN 2` | 252–263 | 两路 CCR 清零后启动 PWM，先跑一次 |
-| `USER CODE BEGIN 3` | 271–279 | 每 20 ms 调一次 `motor_task()` |
+| `USER CODE BEGIN Includes` | 26–31 | `i2c.h` / `oled.h` / `font.h` / `stdio.h` |
+| `USER CODE BEGIN PD` | 39–79 | 中点、死区、最低占空比、加速度步长、**刷屏周期 150 ms** |
+| `USER CODE BEGIN PV` | 88–93 | 当前输出 `out_duty`、ADC 缓存 `last_raw`、两个时间戳 |
+| `USER CODE BEGIN 0` | 102–303 | `adc_read_avg` / `knob_to_pct` / `duty_from_pct` / `motor_apply` / `motor_task` / **`ui_draw`** |
+| `USER CODE BEGIN 2` | 338–359 | 两路 CCR 清零后启动 PWM → 先跑一次 → `OLED_Init()` → 画首帧 |
+| `USER CODE BEGIN 3` | 367–383 | 每 20 ms 调 `motor_task()`，每 150 ms 调 `ui_draw()` |
 | `adc.c` 的 `ADC1_Init 2` | — | 采样时间 1.5 → **55.5 周期** |
+
+**OLED 显示**
+
+屏幕分成四行，从 128×64 的坐标系看：
+
+```
+y= 0  KNOB -> MOTOR            12x6 小字标题
+y=14  + 7 5 %      FWD         24x12 大字（实际输出占空比）+ 方向词
+y=39  [----|███████----]       双向进度条，中线 x=63 是 0 位
+y=53  ADC2048                  8x6 小字，调 KNOB_CENTER 时对着看
+```
+
+几个刻意的设计：
+
+1. **显示的是 `out_duty` 而不是旋钮百分比**。加速度限制会让两者短暂不同步（旋钮已经拧到 100%，输出还在 60%），显示实际输出才代表"电机现在真的多快"。
+2. **进度条以中线为原点双向填充**，因为占空比本身有正负。单向条只能表达大小，表达不了方向。
+3. **刷屏 150 ms、控制 20 ms 分开计时**。整屏 1024 字节走 100 kHz I2C 约 95 ms，且 `OLED_ShowFrame()` 是阻塞的。如果每 20 ms 刷一次，主循环会被 I2C 完全堵住，电机就变成一顿一顿的。
+4. **`OLED_Init()` 前先 `HAL_Delay(20)`**。OLED 的上电复位比 MCU 慢，太早发指令会被当成噪声丢掉，表现就是屏幕全黑但程序在跑。
 
 **四个要点**
 
@@ -433,9 +454,12 @@ CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 
 | 转向和旋钮方向相反 | 把电机两根线对调，或把 `KNOB_CENTER` 当成反向理解 |
 | 中位停不住、一直爬行 | 实测中点不是 2048，把 `KNOB_CENTER` 改成静止时的 ADC 值 |
 | 一开始就有明显电流声但不转 | 旋钮没回到死区内；或调低 `DUTY_MIN` |
+| 屏幕全黑 | OLED 的 SDA/SCL 接反（**PB6=SCL、PB7=SDA**）；或 VCC 没接 3V3 |
+| 屏幕乱码、花屏 | I2C 地址不对，本屏是 CH1116，地址 0x7A |
+| 电机一抖一抖、屏幕刷新很慢 | `UI_PERIOD_MS` 调太小，刷屏把主循环堵住了 |
 
 > `PA15` 和 `PB3` 原本是 JTAG 的 JTDI / JTDO。工程里 `SYS → Debug = Serial Wire`，生成的是 `SWJ_NOJTAG`，只保留 SWD 两线，所以这两个脚能正常当 TIM2 的 CH1/CH2 用，下载调试不受影响。
-> `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，本工程用不到，可忽略。
+> `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，本工程用不到，可忽略。**I2C1（PB6/PB7）是本工程在用的**，重新生成代码时不会丢。
 
 **CLion 一键烧录**
 

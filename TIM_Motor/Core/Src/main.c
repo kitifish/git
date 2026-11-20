@@ -24,7 +24,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "i2c.h"      /* hi2c1、MX_I2C1_Init */
+#include "oled.h"     /* OLED_NewFrame / OLED_ShowFrame 等绘图接口 */
+#include "font.h"     /* afont8x6 / afont12x6 / afont24x12 三套 ASCII 字体 */
+#include <stdio.h>    /* sprintf，把数字拼成字符串再画到屏上 */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -68,6 +71,11 @@
    这样旋钮一转电机是"逐渐加快"而不是"啪一下"全速；
    反向时也会先减速到 0 再反向加速，不会瞬间反接电流冲击 */
 #define SLEW_STEP          5
+
+/* 屏幕刷新周期。整屏 1024 字节走 100kHz I2C 大约 95ms，
+   所以屏幕必须比控制慢得多：20ms 控制电机、150ms 画一屏。
+   如果两件事挤在一起，I2C 会把主循环堵住，电机变成一顿一顿的 */
+#define UI_PERIOD_MS       150U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -80,6 +88,8 @@
 /* USER CODE BEGIN PV */
 static int16_t  out_duty  = 0;    /* 当前实际输出 -100 ~ +100，正=前进 负=后退 */
 static uint32_t ctrl_tick = 0U;   /* 上次采样的时刻 */
+static uint16_t last_raw  = 0U;   /* 最近一次 ADC 原始值，只用于屏幕显示 */
+static uint32_t ui_tick   = 0U;   /* 上次刷屏的时刻 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -195,6 +205,7 @@ static void motor_task(void)
   int16_t  pct    = knob_to_pct(raw);
   int16_t  target = duty_from_pct(pct);
 
+  last_raw = raw;   /* 留给屏幕显示 */
   if (out_duty < target)
   {
     out_duty += SLEW_STEP;
@@ -213,6 +224,80 @@ static void motor_task(void)
   }
 
   motor_apply(out_duty);
+}
+
+/**
+ * @brief  画一屏：标题 / 带符号占空比 / 方向 / 双向进度条 / ADC 原始值
+ * @note   这里显示的是 out_duty（实际输出）而不是旋钮百分比，
+ *         因为加速度限制会让两者短暂不同步，看实际输出更符合"电机现在多快"
+ *         屏幕布局 128x64：
+ *           y=0   小字标题
+ *           y=14  24x12 大字数字（4 个字符 = 48 像素宽）
+ *           y=20  右侧方向词
+ *           y=39  进度条（中线为 0，向右正转、向左反转）
+ *           y=53  小字显示 ADC
+ */
+static void ui_draw(void)
+{
+  char     buf[20];
+  int16_t  duty = out_duty;
+  uint8_t  mag  = (uint8_t)((duty >= 0) ? duty : -duty);   /* 取绝对值，条的长度 */
+  uint8_t  bar;
+
+  OLED_NewFrame();   /* 先在内存里清空一整帧，最后一次性推给屏幕 */
+
+  /* 第 1 行：标题（12x6 字体，每字符 6 像素宽） */
+  OLED_PrintASCIIString(0, 0, "KNOB -> MOTOR", &afont12x6, OLED_COLOR_NORMAL);
+
+  /* 第 2 行：带符号的占空比。%+4d 对正数强制显示 '+'，
+     0 的时候显示成 "0"，避免出现 "  +0" 这种别扭的样子 */
+  if (duty > 0)
+  {
+    sprintf(buf, "%+4d", (int)duty);
+  }
+  else
+  {
+    sprintf(buf, "%4d", (int)duty);
+  }
+  OLED_PrintASCIIString(0, 14, buf, &afont24x12, OLED_COLOR_NORMAL);   /* 24 高 12 宽，4 字符占 x=0~47 */
+  OLED_PrintASCIIString(52, 22, "%", &afont12x6, OLED_COLOR_NORMAL);   /* 百分号用小字挂在右边 */
+
+  /* 方向词：FWD 正转 / REV 反转 / STOP 停转 */
+  if (duty > 0)
+  {
+    OLED_PrintASCIIString(84, 22, "FWD", &afont12x6, OLED_COLOR_NORMAL);
+  }
+  else if (duty < 0)
+  {
+    OLED_PrintASCIIString(84, 22, "REV", &afont12x6, OLED_COLOR_NORMAL);
+  }
+  else
+  {
+    OLED_PrintASCIIString(78, 22, "STOP", &afont12x6, OLED_COLOR_NORMAL);
+  }
+
+  /* 第 3 行：双向进度条。中线 x=63 代表 0，往右填=正转，往左填=反转 */
+  OLED_DrawRectangle(0, 39, 127, 11, OLED_COLOR_NORMAL);   /* 外框 w=127 表示画到 x=126 */
+  OLED_DrawLine(63, 40, 63, 48, OLED_COLOR_NORMAL);        /* 中线标记 */
+
+  bar = (uint8_t)((uint16_t)mag * 60U / 100U);             /* 半条最多 60 像素 */
+  if (bar > 0U)
+  {
+    if (duty > 0)
+    {
+      OLED_DrawFilledRectangle(64, 41, bar, 7, OLED_COLOR_NORMAL);            /* 向右 */
+    }
+    else
+    {
+      OLED_DrawFilledRectangle((uint8_t)(63U - bar), 41, bar, 7, OLED_COLOR_NORMAL); /* 向左 */
+    }
+  }
+
+  /* 第 4 行：ADC 原始值，调 KNOB_CENTER 时对着这个数看 */
+  sprintf(buf, "ADC%4u", (unsigned)last_raw);
+  OLED_PrintASCIIString(0, 53, buf, &afont8x6, OLED_COLOR_NORMAL);
+
+  OLED_ShowFrame();  /* 整帧 1024 字节一次性写进屏幕，约 95ms */
 }
 
 /* USER CODE END 0 */
@@ -247,6 +332,7 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
+  MX_I2C1_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
   /* USER CODE BEGIN 2 */
@@ -260,6 +346,16 @@ int main(void)
   /* 先跑一次，让输出和旋钮当前位置一致 */
   motor_task();
   ctrl_tick = HAL_GetTick();
+
+  /* OLED 的上电复位比 MCU 慢，等 20ms 再发初始化指令，
+     否则第一批命令会被屏里的驱动芯片当成噪声丢掉，屏幕全黑 */
+  HAL_Delay(20);
+  OLED_Init();
+
+  /* 把"上次刷屏时刻"往回拨一个周期，让第一帧立刻画出来
+     （无符号减法自动回绕，不用担心下溢） */
+  ui_tick = HAL_GetTick() - UI_PERIOD_MS;
+  ui_draw();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -274,6 +370,14 @@ int main(void)
     {
       ctrl_tick = HAL_GetTick();
       motor_task();
+    }
+
+    /* 每 150ms 刷一次屏。刷屏是阻塞的（约 95ms 全在等 I2C），
+       所以必须和控制分开计时，否则电机速度会被刷屏拖成锯齿 */
+    if ((HAL_GetTick() - ui_tick) >= UI_PERIOD_MS)
+    {
+      ui_tick = HAL_GetTick();
+      ui_draw();
     }
   }
   /* USER CODE END 3 */
