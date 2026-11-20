@@ -68,3 +68,29 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# ---------------------------------------------------------------------------
+# 烧录相关（用户自己加的，CubeMX 不会覆盖这一段）
+# 1) 编译完自动 objcopy 出 .bin
+# 2) flash 目标：CLion 运行配置里选中它点运行 = 编译 + 烧录 + 复位
+# ---------------------------------------------------------------------------
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin
+    COMMENT "生成 ${CMAKE_PROJECT_NAME}.bin"
+)
+
+set(STM32_PROGRAMMER_CLI
+    "C:/ST/STM32CubeCLT_1.18.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe"
+    CACHE FILEPATH "STM32CubeProgrammer CLI 可执行文件路径")
+
+add_custom_target(flash
+    COMMAND ${STM32_PROGRAMMER_CLI}
+            -c port=SWD
+            -w $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin 0x08000000
+            -rst
+    DEPENDS ${CMAKE_PROJECT_NAME}
+    COMMENT "烧录 ${CMAKE_PROJECT_NAME}.bin 到 0x08000000 并复位"
+    VERBATIM
+)

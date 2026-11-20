@@ -362,6 +362,51 @@ CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 
 
 > 脉宽范围仍是保守的 **1.0~2.0 ms**。网上教程常写 0.5~2.5 ms，但 SG90 的机械限位通常在 1.0~2.0 ms 附近，超出会顶死堵转、电流飙升、发烫。确认自己的舵机能转满 180° 后，再把 `SERVO_MIN_CCR` / `SERVO_MAX_CCR` 往 `50` / `250` 放。
 
+**排查记录：舵机完全不动（已修）**
+
+现象：烧录成功，转旋钮舵机一点反应都没有。
+
+用调试器 hot-plug 连上读内部寄存器，逐步定位：
+
+| 检查项 | 读到的值 | 含义 |
+|---|---|---|
+| `RCC_CFGR` | `0x001D840A` | SWS=10，PLL 72 MHz 正常 |
+| `GPIOB_CRH` | `0x4444444A` | PB8 已配成复用推挽（nibble = A） |
+| `TIM4_PSC` / `TIM4_ARR` | 719 / 1999 | `MX_TIM4_Init()` 执行过 |
+| `TIM4_CR1` | **0** | 定时器没启动 |
+| `TIM4_CCR3` | **0** | 比较值没写过 |
+| `uwTick` | 持续递增 | SysTick 正常，不是死机 |
+
+`MX_TIM4_Init()` 到 `HAL_TIM_PWM_Start()` 之间只有 `HAL_Delay(20)` 和 `OLED_Init()`。SysTick 在走说明延时能过，于是锁定 `OLED_Init()`。
+
+根因在 `oled.c` 的底层发送：
+
+```c
+HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, HAL_MAX_DELAY);
+```
+
+`HAL_MAX_DELAY` 在阻塞式 I2C 里不是"不等"，而是"等到天荒地老"（0xFFFFFFFF 个 tick，约 49 天）。OLED 没接、SDA/SCL 接反、或屏的供电没接时，总线一直是 busy，函数永远返回不了，PWM 就永远启动不了。
+
+修法是把超时改成有限值，并记住"这块屏已经没救了"，后续不再碰总线：
+
+```c
+#define OLED_I2C_TIMEOUT 50U   /* 129 字节 @100kHz 约 11.6 ms */
+
+static uint8_t oled_ok = 0U;
+
+void OLED_Send(uint8_t *data, uint8_t len) {
+  if (oled_ok == 0U) return;
+  if (HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, OLED_I2C_TIMEOUT) != HAL_OK)
+    oled_ok = 0U;
+}
+```
+
+`OLED_Init()` 开头把 `oled_ok` 置 1，发完第一条命令检查一次，失败立刻退出。这样屏坏或没接只影响显示，不会连累舵机。
+
+修复后实测：`TIM4_CR1 = 1`、`CCR3 = 137`（1.37 ms ≈ 66°）、`CCER = 0x100`，PWM 正常输出，舵机跟着旋钮转。
+
+> 教训：任何"等外部设备"的 HAL 调用都别用 `HAL_MAX_DELAY`。初始化阶段尤其致命——一个可选的显示模块，不该有能力让主功能永远起不来。
+
 ## TIM_Motor：旋钮控制直流电机正反转（DRV8833）
 
 旋钮中位停转，往一侧拧正向加速，往另一侧拧反向加速。

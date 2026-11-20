@@ -37,6 +37,15 @@
 // 显存
 uint8_t OLED_GRAM[OLED_PAGE][OLED_COLUMN];
 
+/* 屏在线标志。0 = 上电握手失败（没接屏 / SDA-SCL 接反 / 供电没接），
+   之后所有发送直接返回，不再碰 I2C 总线 */
+static uint8_t oled_ok = 0U;
+
+/* I2C 单次传输超时。128 字节 + 1 控制字节走 100kHz 约 11.6ms，
+   给 50ms 留足余量；不能再用 HAL_MAX_DELAY，否则屏不在线时
+   函数会一直等（HAL_MAX_DELAY 实际是 0xFFFFFFFF 个 tick，约 49 天） */
+#define OLED_I2C_TIMEOUT 50U
+
 // ========================== 底层通信函数 ==========================
 
 /**
@@ -45,9 +54,15 @@ uint8_t OLED_GRAM[OLED_PAGE][OLED_COLUMN];
  * @param len 要发送的数据长度
  * @return None
  * @note 此函数是移植本驱动时的重要函数 将本驱动库移植到其他平台时应根据实际情况修改此函数
+ * @note 超时后把 oled_ok 清零，后续调用立即返回，避免每次刷屏都卡满超时
  */
 void OLED_Send(uint8_t *data, uint8_t len) {
-  HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, HAL_MAX_DELAY);
+  if (oled_ok == 0U) {
+    return;
+  }
+  if (HAL_I2C_Master_Transmit(&hi2c1, OLED_ADDRESS, data, len, OLED_I2C_TIMEOUT) != HAL_OK) {
+    oled_ok = 0U;
+  }
 }
 
 /**
@@ -66,7 +81,15 @@ void OLED_SendCmd(uint8_t cmd) {
  * @note 此函数是移植本驱动时的重要函数 将本驱动库移植到其他驱动芯片时应根据实际情况修改此函数
  */
 void OLED_Init() {
+  /* 先假定屏在线，发第一条命令就知道真实情况：
+     发不出去说明屏没接好，立刻退出，别让整个程序卡在初始化里，
+     否则后面的 PWM、电机、舵机全都启动不了 */
+  oled_ok = 1U;
+
   OLED_SendCmd(0xAE); /*关闭显示 display off*/
+  if (oled_ok == 0U) {
+    return;
+  }
 
   OLED_SendCmd(0x02); /*设置列起始地址 set lower column address*/
   OLED_SendCmd(0x10); /*设置列结束地址 set higher column address*/
