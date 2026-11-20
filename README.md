@@ -15,7 +15,7 @@ STM32/
 ├── TIM_SlaveMode/   定时器从模式：TIM2 复位模式 + TI1FP1 触发，CNT 即外部信号周期
 ├── PWM_Light/       PWM 呼吸灯：TIM3_CH1（PA6）10kHz 输出，主循环扫 CCR
 ├── TIM_Encoder/     旋转电位器：ADC 采样 → PC13 亮灭 + 三路 PWM 调光 + OLED 显示
-├── TIM_Servo/       舵机扫角：TIM4_CH3（PB8）50Hz PWM，脉宽 1.0~2.0ms 来回摆
+├── TIM_Servo/       旋钮控舵机：ADC 采样电位器 → TIM4_CH3（PB8）50Hz PWM → OLED 显示角度
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
@@ -296,48 +296,70 @@ PA6 ── 220Ω~1kΩ ──|>|── GND     （LED 长脚接电阻，短脚接
 
 > `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，那是给 EC11 用的，本模块用不上。留着无害（只是白占两个脚，其中 PA9 还是 USART1_TX），想干净就在 CubeMX 里取消 TIM1 后重新生成。
 
-## TIM_Servo：舵机 PWM 扫角
+## TIM_Servo：旋钮控制舵机 + OLED 显示
 
-对应 B 站「舵机」那一集。TIM4 的 CH3 输出 50 Hz PWM，让舵机在 0° ↔ 180° 之间来回扫。
+对应 B 站「舵机」那一集，按手里的元件改成**旋转电位器 → 舵机 → OLED 显示角度**：
 
-**接线（SG90）**
+```
+电位器 OUT ──► PA0(ADC1_IN0) ──► 0~4095 ──► 0~100% ──► 0~180°
+                                                          │
+                                              TIM4_CH3(PB8) 50Hz PWM
+                                                          ▼
+                                                     舵机转到对应角度
+                                                          │
+                                              I2C1(PB6/PB7) 同步显示
+```
 
-| 舵机线 | 接到 |
-|---|---|
-| 橙 / 黄（信号） | **PB8**（TIM4_CH3） |
-| 红（VCC） | **5V** —— 不要接 3V3，堵转电流能到 700 mA，会拉垮板子 |
-| 棕 / 黑（GND） | **GND**，必须和板子共地 |
+**接线**
 
-**参数换算（这是这个工程唯一需要算清楚的东西）**
+| 元件 | 引脚 | 接到 |
+|---|---|---|
+| 电位器 | VCC | **3V3**（不能接 5V，OUT 会超 3.3V 击穿 PA0） |
+| 电位器 | GND | GND |
+| 电位器 | OUT | **PA0** |
+| 舵机 | 橙 / 黄（信号） | **PB8**（TIM4_CH3） |
+| 舵机 | 红（VCC） | **5V** —— 不要接 3V3，堵转电流能到 700 mA |
+| 舵机 | 棕 / 黑（GND） | GND，必须和板子共地 |
+| OLED | SCL / SDA | **PB6 / PB7** |
+| OLED | VCC / GND | 3V3 / GND |
+
+**参数换算**
 
 ```
 72 MHz ÷ 720 = 100 kHz  →  1 个计数 = 10 µs
 Period = 2000 - 1       →  2000 × 10 µs = 20 ms = 50 Hz   ← 舵机标准周期
-CCR = 100 → 1.0 ms →   0°
-CCR = 150 → 1.5 ms →  90°（中位）
-CCR = 200 → 2.0 ms → 180°
+CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 → 2.0 ms → 180°
 ```
 
-`CCR = (angle × 100 / 180) + 100`，代码里用整数算，不碰浮点。每 20 ms 走 1°，一个来回约 7.2 秒。
+百分比到 CCR 只差 100，所以 `CCR = 100 + pct`，连除法都不用。
 
 **代码结构**
 
 | 锚点 | 行号 | 内容 |
 |---|---|---|
-| `USER CODE BEGIN PD` | 36–54 | 脉宽范围 `SERVO_MIN_CCR` / `SERVO_MAX_CCR`、步长、步进周期 |
-| `USER CODE BEGIN PV` | 63–67 | 当前角度、方向、时间戳 |
-| `USER CODE BEGIN 0` | 76–112 | `servo_angle_to_ccr()` 角度→CCR、`servo_step()` 走一步并写 CCR |
-| `USER CODE BEGIN 2` | 146–153 | 先设好初始 CCR 再 `HAL_TIM_PWM_Start` |
-| `USER CODE BEGIN 3` | 161–170 | 每 20 ms 调一次 `servo_step()` |
+| `USER CODE BEGIN Includes` | 27–31 | `stdio.h` + `oled.h` + `font.h` |
+| `USER CODE BEGIN PD` | 39–60 | 脉宽上下限、采样平均次数、控制周期、刷屏周期、死区 |
+| `USER CODE BEGIN PV` | 69–74 | 上次百分比、当前 CCR、两个时间戳 |
+| `USER CODE BEGIN 0` | 83–202 | `adc_read_avg` / `adc_to_pct` / `pct_to_ccr` / `pct_to_deg` / `ui_draw` / `control_task` |
+| `USER CODE BEGIN 2` | 237–252 | 等 20 ms → `OLED_Init` → 先给中位 CCR 再 `HAL_TIM_PWM_Start` → 先画一帧 |
+| `USER CODE BEGIN 3` | 260–268 | 每 20 ms 调一次 `control_task()` |
+| `adc.c` 的 `ADC1_Init 2` | — | 采样时间 1.5 → **55.5 周期** |
 
-**接手时修掉的 4 个问题**
+**四个设计要点**
 
-1. **时钟是 8 MHz 而不是 72 MHz**（致命）。原来 `RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE`、`SYSCLKSource = HSI`，HSE 晶振虽然选了但根本没启用。于是 TIM4 实际是 `8 MHz ÷ 720 ÷ 2000 = 5.56 Hz`（周期 180 ms），舵机只会嗡嗡抖、不定位。改成 HSE 8 MHz × PLL9 = 72 MHz 后，同一组 Prescaler/Period 才正好是 50 Hz。
-2. **`main.c` 的 USER CODE 段全是空的**（致命）。PWM 从没 `Start`、CCR 一直是 0，等于没有脉冲，舵机完全不动。现在补上了扫角逻辑。
-3. **TIM1 又被配成了编码器模式**（PA8/PA9）。舵机用不到，而且把 PA9（USART1_TX）占了。建议在 CubeMX 里取消 TIM1。
-4. **ADC1 空挂在 PA0**，本工程没用到，可一起取消。
+1. **采样时间必须加长**。电位器分压后源阻抗最大约 2.5 kΩ，1.5 个周期（125 ns）采样电容充不满，读数偏低且随旋钮位置乱跳。改成 55.5 周期（约 4.6 µs）。改在 `adc.c` 的 USER CODE 里，`.ioc` 显示的还是 1.5，但代码会覆盖它。
+2. **8 次采样取平均 + 1% 死区**。ADC 末位本来就在抖，直接换算会让舵机听到连续的微小脉宽变化、原地嗡嗡响。取平均压掉大部分，再用「变化不到 1% 就不发新 CCR」兜底。
+3. **屏幕 150 ms 刷一次，控制 20 ms 一次**。整屏 1024 字节走 100 kHz I2C 约 95 ms，如果每 20 ms 都刷屏，主循环会被 I2C 阻塞，舵机就变成一段一段地卡。所以控制与显示分开计节拍。
+4. **先写 CCR 再 `HAL_TIM_PWM_Start`**。启动瞬间 CCR 为 0 相当于没有脉冲，某些舵机会先抽一下。上电直接给中位（90°/1.5 ms），姿态最安全。
 
-> 脉宽范围选择了保守的 **1.0~2.0 ms**。网上教程常写 0.5~2.5 ms，但 SG90 的机械限位通常在 1.0~2.0 ms 附近，超出会顶死堵转、电流飙升、发烫。确认自己的舵机能转满 180° 后，再把 `SERVO_MIN_CCR` / `SERVO_MAX_CCR` 往 `50` / `250` 放。
+**改动记录**
+
+- 时钟原本被 GPT 留成 HSI 8 MHz 且 PLL 未开，TIM4 实际只有 5.56 Hz，舵机只会发抖；已改为 HSE 8 MHz × PLL9 = 72 MHz，`.ioc` 的 RCC 键也一并补全。
+- 原来 `main.c` 的 USER CODE 段是空的，PWM 从未启动；现在换成了旋钮控制逻辑。
+- 本工程原本没有 I2C1。为了让 `.ioc` 与代码一致，手工补了 `I2C1`（PB6/PB7，100 kHz）、`i2c.c` / `i2c.h`、`hal_conf` 的 `HAL_I2C_MODULE_ENABLED`，以及 CMake 里的 `i2c.c` 与 `stm32f1xx_hal_i2c.c`。CubeMX 打开这个 `.ioc` 会直接看到 I2C1 已启用。
+- 仍保留未使用的 **TIM1 编码器模式（PA8/PA9）**，无害，想干净可在 CubeMX 里取消。
+
+> 脉宽范围仍是保守的 **1.0~2.0 ms**。网上教程常写 0.5~2.5 ms，但 SG90 的机械限位通常在 1.0~2.0 ms 附近，超出会顶死堵转、电流飙升、发烫。确认自己的舵机能转满 180° 后，再把 `SERVO_MIN_CCR` / `SERVO_MAX_CCR` 往 `50` / `250` 放。
 
 ## 编译
 

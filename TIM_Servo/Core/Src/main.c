@@ -19,12 +19,15 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "adc.h"
+#include "i2c.h"
 #include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <stdio.h>
+#include "oled.h"
+#include "font.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -49,8 +52,11 @@
 #define SERVO_MIN_CCR      100U   /* 对应   0 度 / 1.0ms */
 #define SERVO_MAX_CCR      200U   /* 对应 180 度 / 2.0ms */
 
-#define SERVO_STEP_DEG     1      /* 每次走 1 度 */
-#define SERVO_PERIOD_MS    20U    /* 每 20ms 走一步，和舵机刷新周期对齐 */
+/* ---------- 电位器 -> 舵机 ---------- */
+#define ADC_AVG_N          8U     /* 每次读 8 次 ADC 取平均，压掉抖动 */
+#define CTRL_PERIOD_MS     20U    /* 每 20ms 采一次、更新一次 CCR */
+#define UI_PERIOD_MS       150U   /* 屏幕 150ms 刷一次：整屏 I2C 传输约 95ms */
+#define DEADBAND_PCT       1U     /* 变化小于 1% 就不动，避免舵机原地嗡嗡抖 */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -61,9 +67,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-static int16_t  servo_angle = 0;    /* 当前角度 0~180 */
-static int8_t   servo_dir   = 1;    /* +1 = 往 180 度走，-1 = 往 0 度走 */
-static uint32_t servo_tick  = 0U;   /* 上次走步的时刻 */
+static uint8_t  last_pct     = 50U;    /* 上次的旋钮百分比，初值取中位 */
+static uint16_t last_ccr     = 0U;     /* 当前输出的 CCR */
+static uint32_t ctrl_tick    = 0U;     /* 上次采样的时刻 */
+static uint32_t ui_last_tick = 0U;     /* 上次刷屏的时刻 */
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -76,37 +83,120 @@ void SystemClock_Config(void);
 /* USER CODE BEGIN 0 */
 
 /**
- * @brief  角度(0~180) 换算成 CCR(50~250)
- * @note   用整数线性插值，不碰浮点：180 度对应 CCR 差 200，正好 1 度 ≈ 1.11 个 CCR
+ * @brief  连续读 ADC_AVG_N 次取平均
+ * @note   单次读数有 ±2~3 个字的抖动，直接拿去算角度，舵机会在原地小幅抽动。
  */
-static uint16_t servo_angle_to_ccr(int16_t deg)
+static uint16_t adc_read_avg(void)
 {
-  if (deg < 0)   { deg = 0; }
-  if (deg > 180) { deg = 180; }
+  uint32_t sum = 0U;
+  uint8_t  i;
 
-  return (uint16_t)(SERVO_MIN_CCR +
-                    ((int32_t)deg * (int32_t)(SERVO_MAX_CCR - SERVO_MIN_CCR)) / 180);
+  for (i = 0U; i < ADC_AVG_N; i++)
+  {
+    HAL_ADC_Start(&hadc1);
+    if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK)
+    {
+      sum += HAL_ADC_GetValue(&hadc1);
+    }
+    HAL_ADC_Stop(&hadc1);
+  }
+
+  return (uint16_t)(sum / ADC_AVG_N);
 }
 
 /**
- * @brief  走一步：角度加/减 1 度，到两端就掉头，然后写 CCR
+ * @brief  原始值 0~4095 换算成百分比 0~100
  */
-static void servo_step(void)
+static uint8_t adc_to_pct(uint16_t raw)
 {
-  servo_angle += (int16_t)(servo_dir * SERVO_STEP_DEG);
+  uint32_t pct = (uint32_t)raw * 100U / 4095U;
 
-  if (servo_angle >= 180)
+  if (pct > 100U)
   {
-    servo_angle = 180;
-    servo_dir   = -1;
+    pct = 100U;
   }
-  else if (servo_angle <= 0)
+  return (uint8_t)pct;
+}
+
+/**
+ * @brief  百分比 0~100 换算成 CCR 100~200（即 1.0ms ~ 2.0ms）
+ * @note   CCR 差正好 100，所以 CCR = 100 + pct，不用做除法
+ */
+static uint16_t pct_to_ccr(uint8_t pct)
+{
+  return (uint16_t)(SERVO_MIN_CCR +
+                    ((uint16_t)pct * (SERVO_MAX_CCR - SERVO_MIN_CCR)) / 100U);
+}
+
+/**
+ * @brief  百分比 0~100 换算成角度 0~180
+ */
+static uint16_t pct_to_deg(uint8_t pct)
+{
+  return (uint16_t)(((uint16_t)pct * 180U) / 100U);
+}
+
+/**
+ * @brief  画一屏：标题 / 大号角度 / 进度条 / ADC 与 CCR
+ */
+static void ui_draw(uint16_t deg, uint8_t pct, uint16_t ccr, uint16_t raw)
+{
+  char    buf[20];
+  uint8_t bar_w;
+
+  OLED_NewFrame();
+
+  /* 第 1 行：标题（12x6 字体） */
+  OLED_PrintASCIIString(0, 0, "KNOB -> SERVO", &afont12x6, OLED_COLOR_NORMAL);
+
+  /* 第 2 行：大号角度（24x12 字体，一个字符 12 像素宽），右边补单位 */
+  sprintf(buf, "%3u", (unsigned)deg);
+  OLED_PrintASCIIString(2, 13, buf, &afont24x12, OLED_COLOR_NORMAL);
+  OLED_PrintASCIIString(44, 20, "deg", &afont12x6, OLED_COLOR_NORMAL);
+
+  /* 第 3 行：进度条，外框 126x10，内部按旋钮百分比填充 */
+  OLED_DrawRectangle(0, 39, 126, 10, OLED_COLOR_NORMAL);
+  bar_w = (uint8_t)((uint16_t)pct * 122U / 100U);
+  if (bar_w > 0U)
   {
-    servo_angle = 0;
-    servo_dir   = 1;
+    OLED_DrawFilledRectangle(2, 41, bar_w, 6, OLED_COLOR_NORMAL);
   }
 
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, servo_angle_to_ccr(servo_angle));
+  /* 第 4 行：ADC 原始值 + 当前 CCR（8x6 字体） */
+  sprintf(buf, "ADC%4u PWM%3u", (unsigned)raw, (unsigned)ccr);
+  OLED_PrintASCIIString(0, 53, buf, &afont8x6, OLED_COLOR_NORMAL);
+
+  OLED_ShowFrame();
+}
+
+/**
+ * @brief  一次完整的「采样 -> 换算 -> 驱动舵机 -> 刷新屏幕」
+ * @note   屏幕 150ms 才刷一次：整屏 1024 字节走 100kHz I2C 约 95ms，
+ *         如果每 20ms 都刷，主循环会被 I2C 完全堵住，舵机就卡成一段一段的。
+ */
+static void control_task(void)
+{
+  uint16_t raw = adc_read_avg();
+  uint8_t  pct = adc_to_pct(raw);
+  uint8_t  diff;
+
+  /* 旋钮几乎没动（差值 < DEADBAND_PCT）就不改 CCR，
+     否则 ADC 的最后一位在抖，舵机会一直听到新脉宽、原地嗡嗡响 */
+  diff = (pct > last_pct) ? (uint8_t)(pct - last_pct)
+                          : (uint8_t)(last_pct - pct);
+
+  if (diff >= DEADBAND_PCT)
+  {
+    last_pct = pct;
+    last_ccr = pct_to_ccr(pct);
+    __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, last_ccr);
+  }
+
+  if ((HAL_GetTick() - ui_last_tick) >= UI_PERIOD_MS)
+  {
+    ui_last_tick = HAL_GetTick();
+    ui_draw(pct_to_deg(last_pct), last_pct, last_ccr, raw);
+  }
 }
 
 /* USER CODE END 0 */
@@ -141,15 +231,24 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_ADC1_Init();
+  MX_I2C1_Init();
   MX_TIM1_Init();
   MX_TIM4_Init();
   /* USER CODE BEGIN 2 */
-  /* 先把 CCR 设到 0 度对应的脉宽，再启动 PWM，
+  /* OLED 上电比 MCU 慢，先等 20ms 再初始化，否则第一批指令会丢 */
+  HAL_Delay(20);
+  OLED_Init();
+
+  /* 先把 CCR 设到中位（90 度）再启动 PWM，
      否则会先输出一个 CCR=0 的"无脉冲"，某些舵机会抖一下 */
-  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, servo_angle_to_ccr(servo_angle));
+  last_ccr = pct_to_ccr(last_pct);
+  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, last_ccr);
   HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
 
-  servo_tick = HAL_GetTick();
+  /* 把"上次刷屏时刻"设成刚好过期，让第一帧立刻画出来（无符号减法会自动回绕） */
+  ui_last_tick = HAL_GetTick() - UI_PERIOD_MS;
+  control_task();
+  ctrl_tick = HAL_GetTick();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -159,12 +258,11 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    /* 每 20ms 走一度，0→180 约 3.6 秒，再掉头回来。
-       不用 HAL_Delay，主循环保持可响应。 */
-    if ((HAL_GetTick() - servo_tick) >= SERVO_PERIOD_MS)
+    /* 每 20ms 跟着旋钮更新一次。不用 HAL_Delay，主循环保持可响应。 */
+    if ((HAL_GetTick() - ctrl_tick) >= CTRL_PERIOD_MS)
     {
-      servo_tick = HAL_GetTick();
-      servo_step();
+      ctrl_tick = HAL_GetTick();
+      control_task();
     }
   }
   /* USER CODE END 3 */

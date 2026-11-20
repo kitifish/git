@@ -64,7 +64,16 @@ void MX_ADC1_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN ADC1_Init 2 */
-
+  /* 电位器输出阻抗最大约 2.5kΩ，1.5 个周期的采样时间太短，
+     采样电容充不满会让读数偏低、而且随旋钮位置乱跳。
+     改成 55.5 个 ADC 周期（ADC 12MHz 下约 4.6us），读数就稳了。 */
+  sConfig.Channel      = ADC_CHANNEL_0;
+  sConfig.Rank         = ADC_REGULAR_RANK_1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END ADC1_Init 2 */
 
 }
