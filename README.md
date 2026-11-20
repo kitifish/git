@@ -15,11 +15,12 @@ STM32/
 ├── TIM_SlaveMode/   定时器从模式：TIM2 复位模式 + TI1FP1 触发，CNT 即外部信号周期
 ├── PWM_Light/       PWM 呼吸灯：TIM3_CH1（PA6）10kHz 输出，主循环扫 CCR
 ├── TIM_Encoder/     旋转电位器：ADC 采样 → PC13 亮灭 + 三路 PWM 调光 + OLED 显示
+├── TIM_Servo/       舵机扫角：TIM4_CH3（PB8）50Hz PWM，脉宽 1.0~2.0ms 来回摆
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-十一个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+十二个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -294,6 +295,49 @@ PA6 ── 220Ω~1kΩ ──|>|── GND     （LED 长脚接电阻，短脚接
 3. **不接外部元件也能验证**：PC13 是板载灯，转动旋钮过 50% 就会亮；OLED 上同时显示百分比、进度条、ADC 原始值和 `LED ON/OFF`。TIM3 的三路 PWM 只是额外送的调光输出，不接也没关系。
 
 > `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，那是给 EC11 用的，本模块用不上。留着无害（只是白占两个脚，其中 PA9 还是 USART1_TX），想干净就在 CubeMX 里取消 TIM1 后重新生成。
+
+## TIM_Servo：舵机 PWM 扫角
+
+对应 B 站「舵机」那一集。TIM4 的 CH3 输出 50 Hz PWM，让舵机在 0° ↔ 180° 之间来回扫。
+
+**接线（SG90）**
+
+| 舵机线 | 接到 |
+|---|---|
+| 橙 / 黄（信号） | **PB8**（TIM4_CH3） |
+| 红（VCC） | **5V** —— 不要接 3V3，堵转电流能到 700 mA，会拉垮板子 |
+| 棕 / 黑（GND） | **GND**，必须和板子共地 |
+
+**参数换算（这是这个工程唯一需要算清楚的东西）**
+
+```
+72 MHz ÷ 720 = 100 kHz  →  1 个计数 = 10 µs
+Period = 2000 - 1       →  2000 × 10 µs = 20 ms = 50 Hz   ← 舵机标准周期
+CCR = 100 → 1.0 ms →   0°
+CCR = 150 → 1.5 ms →  90°（中位）
+CCR = 200 → 2.0 ms → 180°
+```
+
+`CCR = (angle × 100 / 180) + 100`，代码里用整数算，不碰浮点。每 20 ms 走 1°，一个来回约 7.2 秒。
+
+**代码结构**
+
+| 锚点 | 行号 | 内容 |
+|---|---|---|
+| `USER CODE BEGIN PD` | 36–54 | 脉宽范围 `SERVO_MIN_CCR` / `SERVO_MAX_CCR`、步长、步进周期 |
+| `USER CODE BEGIN PV` | 63–67 | 当前角度、方向、时间戳 |
+| `USER CODE BEGIN 0` | 76–112 | `servo_angle_to_ccr()` 角度→CCR、`servo_step()` 走一步并写 CCR |
+| `USER CODE BEGIN 2` | 146–153 | 先设好初始 CCR 再 `HAL_TIM_PWM_Start` |
+| `USER CODE BEGIN 3` | 161–170 | 每 20 ms 调一次 `servo_step()` |
+
+**接手时修掉的 4 个问题**
+
+1. **时钟是 8 MHz 而不是 72 MHz**（致命）。原来 `RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE`、`SYSCLKSource = HSI`，HSE 晶振虽然选了但根本没启用。于是 TIM4 实际是 `8 MHz ÷ 720 ÷ 2000 = 5.56 Hz`（周期 180 ms），舵机只会嗡嗡抖、不定位。改成 HSE 8 MHz × PLL9 = 72 MHz 后，同一组 Prescaler/Period 才正好是 50 Hz。
+2. **`main.c` 的 USER CODE 段全是空的**（致命）。PWM 从没 `Start`、CCR 一直是 0，等于没有脉冲，舵机完全不动。现在补上了扫角逻辑。
+3. **TIM1 又被配成了编码器模式**（PA8/PA9）。舵机用不到，而且把 PA9（USART1_TX）占了。建议在 CubeMX 里取消 TIM1。
+4. **ADC1 空挂在 PA0**，本工程没用到，可一起取消。
+
+> 脉宽范围选择了保守的 **1.0~2.0 ms**。网上教程常写 0.5~2.5 ms，但 SG90 的机械限位通常在 1.0~2.0 ms 附近，超出会顶死堵转、电流飙升、发烫。确认自己的舵机能转满 180° 后，再把 `SERVO_MIN_CCR` / `SERVO_MAX_CCR` 往 `50` / `250` 放。
 
 ## 编译
 
