@@ -437,6 +437,25 @@ CCR = 100 → 1.0 ms →   0°     CCR = 150 → 1.5 ms →  90°     CCR = 200 
 > `PA15` 和 `PB3` 原本是 JTAG 的 JTDI / JTDO。工程里 `SYS → Debug = Serial Wire`，生成的是 `SWJ_NOJTAG`，只保留 SWD 两线，所以这两个脚能正常当 TIM2 的 CH1/CH2 用，下载调试不受影响。
 > `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，本工程用不到，可忽略。
 
+**CLion 一键烧录**
+
+这个工程的 `CMakeLists.txt` 末尾加了两样东西（CubeMX 不会覆盖这一段）：
+
+1. `POST_BUILD` 里补了 `objcopy`，每次编译完自动生成 `build/Debug/TIM_Motor.bin`
+2. 一个名为 **`flash`** 的 CMake 目标，内容就是调用 `STM32_Programmer_CLI` 把 bin 写进 Flash 并复位
+
+用法：CLion 右上角的运行配置下拉框里选 **`flash`**，点 ▶。它会先编译、再烧录，一步到位。
+
+如果换了电脑或 CLT 版本，改 `CMakeLists.txt` 里这一行的路径即可：
+
+```cmake
+set(STM32_PROGRAMMER_CLI
+    "C:/ST/STM32CubeCLT_1.18.0/STM32CubeProgrammer/bin/STM32_Programmer_CLI.exe"
+    CACHE FILEPATH "...")
+```
+
+> 注意 `flash` 只负责烧录，不会进调试。要看变量、单步，还是用 CLion 的调试配置（本机 CLT 里没有 OpenOCD，需要另外安装才能用 "OpenOCD Download & Run"）。
+
 ## 编译
 
 ```bash
