@@ -14,11 +14,12 @@ STM32/
 ├── xunjiTIM/        定时器外部时钟：循迹模块 DO→PA15，TIM2 ETR 计数，OLED 显示速度
 ├── TIM_SlaveMode/   定时器从模式：TIM2 复位模式 + TI1FP1 触发，CNT 即外部信号周期
 ├── PWM_Light/       PWM 呼吸灯：TIM3_CH1（PA6）10kHz 输出，主循环扫 CCR
+├── TIM_Encoder/     旋转电位器：ADC 采样 → PC13 亮灭 + 三路 PWM 调光 + OLED 显示
 ├── LED/             点灯入门（第一版）
 └── lighting/        点灯入门（第二版）
 ```
 
-十个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
+十一个工程各约 283 个受版本控制的文件。构建产物（`build/`、`cmake-build-*/`）与 CMSIS 中本工程未使用的 `DSP` / `Lib` / `NN` / `RTOS` / `Core_A` / `docs`（合计约 50MB）均已排除，clone 后可直接编译。
 
 ## 硬件接线
 
@@ -253,6 +254,46 @@ PA6 ── 220Ω~1kΩ ──|>|── GND     （LED 长脚接电阻，短脚接
 ```
 
 或者把板载灯那侧当作"只验证代码跑通"，想看效果还是外接一颗。ADC1 在 `.ioc` 里仍勾着（PA0），本工程没用到，可忽略。
+
+## TIM_Encoder：旋转电位器 → LED 亮灭 + OLED 显示
+
+对应 B 站「旋转控制小灯」那一集。**注意：这套代码是给「旋转电位器模块」（3 脚 OUT/VCC/GND，丝印 `Rotation Sensor`）写的，不是给旋转编码器（EC11，A/B 两相脉冲）写的。**
+
+| 项目 | 配置 |
+|---|---|
+| 模块供电 | VCC → **3V3**（不能接 5V，OUT 会超过 3.3V 击穿 PA0）、GND → GND |
+| 信号 | OUT → **PA0**（ADC1_IN0） |
+| 板载 LED | **PC13**，低电平点亮，代码里手动初始化（CubeMX 勾不到这个脚） |
+| 外接 LED（可选） | PA6 / PA7 / PB0（TIM3 CH1/CH2/CH3）任选一路，串 220Ω~1kΩ 到 GND |
+| OLED | I2C1：PB6=SCL、PB7=SDA，地址 `0x7A`（CH1116） |
+
+**CubeMX 关键配置**
+
+| 外设 | 设置 | 说明 |
+|---|---|---|
+| ADC1 | IN0，Software Start，单次转换 | 采样时间代码里改成 55.5 周期（见下） |
+| TIM3 | PWM Generation CH1/CH2/CH3，Prescaler 72-1，Period 100-1 | 10 kHz、100 档，占空比 = CCR/100 |
+| I2C1 | I2C，Standard Mode 100 kHz | OLED 走这条总线 |
+| SYS | Debug = **Serial Wire** | 千万别选 No Debug，会把 SWD 关掉锁死 |
+
+**代码结构**
+
+| 锚点 | 行号 | 内容 |
+|---|---|---|
+| `USER CODE BEGIN PD` | 39–53 | LED 引脚、50%/47% 双阈值、8 次平均、50 ms 刷新 |
+| `USER CODE BEGIN PV` | 62–65 | `led_on`、`ui_last_tick` |
+| `USER CODE BEGIN 0` | 74–198 | `led_gpio_init` / `adc_read_avg` / `adc_to_percent` / `ui_draw` / `app_task` |
+| `USER CODE BEGIN 2` | 233–249 | 初始化 OLED、启动三路 PWM、先画一帧 |
+| `USER CODE BEGIN 3` | 257–265 | 每 50 ms 调一次 `app_task` |
+| `adc.c` 的 `USER CODE ADC1_Init 2` | — | 采样时间 1.5 → 55.5 周期 |
+
+**三个关键点**
+
+1. **迟滞比较**：`>=50%` 点亮、`<=47%` 熄灭。少了 3% 的死区，旋钮停在 50% 附近时读数在 4090/4100 之间抖，LED 就会疯狂闪烁。
+2. **采样时间要够长**：电位器分压后源阻抗最大约 2.5 kΩ，`1.5` 个 ADC 周期（12 MHz 下 125 ns）采样电容充不满，读数会偏低且不稳。`55.5` 周期（约 4.6 µs）才是常规选择。
+3. **不接外部元件也能验证**：PC13 是板载灯，转动旋钮过 50% 就会亮；OLED 上同时显示百分比、进度条、ADC 原始值和 `LED ON/OFF`。TIM3 的三路 PWM 只是额外送的调光输出，不接也没关系。
+
+> `.ioc` 里还留着 **TIM1 编码器模式（PA8/PA9）**，那是给 EC11 用的，本模块用不上。留着无害（只是白占两个脚，其中 PA9 还是 USART1_TX），想干净就在 CubeMX 里取消 TIM1 后重新生成。
 
 ## 编译
 
